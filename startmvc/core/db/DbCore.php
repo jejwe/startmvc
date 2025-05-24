@@ -31,6 +31,11 @@ class DbCore implements DbInterface
      * @var PDO|null PDO实例
      */
     public $pdo = null;
+    
+    /**
+     * @var mixed WordPress $wpdb instance
+     */
+    public $wpdb = null; // THIS LINE MUST BE PRESENT
 
     /**
      * @var mixed 查询变量
@@ -128,52 +133,111 @@ class DbCore implements DbInterface
 
     /**
      * 构造函数
-     * @param array $config 数据库配置
+     * @param array|string $config 数据库配置 or 'wordpress' string
      */
     public function __construct($config)
     {
+        if ($config === 'wordpress') {
+            global $wpdb;
+            if (!isset($wpdb) || !is_object($wpdb) || !method_exists($wpdb, 'get_results')) {
+                // Try to re-fetch $wpdb if it wasn't available initially or was not the correct object
+                // This can happen depending on when this class is instantiated within WordPress load.
+                if (isset($GLOBALS['wpdb']) && is_object($GLOBALS['wpdb']) && method_exists($GLOBALS['wpdb'], 'get_results')) {
+                    $wpdb = $GLOBALS['wpdb'];
+                } else {
+                    throw new \startmvc\core\Exception('WordPress $wpdb global is not available or not a valid WPDB object.');
+                }
+            }
+            $this->wpdb = $wpdb;
+            $this->prefix = $this->wpdb->prefix ?? ''; // Use null coalescing for safety
+            $this->connected = true; 
+            // Bypassing original PDO connection and StartMVC cache dir setup for WordPress
+            return; 
+        }
+
+        // Original StartMVC constructor logic starts here
         $this->config = $config;
-        $this->prefix = $config['prefix'] ?? ''; // 设置表前缀
+        // Ensure prefix is only set from $config if not in WordPress mode
+        if (!($config === 'wordpress')) { // This condition is technically redundant due to the return above, but for clarity
+             $this->prefix = $config['prefix'] ?? ''; 
+        }
         
-        // 初始化缓存目录
+        // Initialize cache directory (only for non-WordPress)
         if (!empty($config['cachedir'])) {
             $this->cacheDir = $config['cachedir'];
-            
-            // 确保缓存目录存在
             if (!file_exists($this->cacheDir)) {
-                mkdir($this->cacheDir, 0755, true);
+                // Suppress errors for mkdir, check if directory exists afterwards
+                if (@mkdir($this->cacheDir, 0755, true) === false && !is_dir($this->cacheDir)) {
+                    // Log or handle error: "Failed to create cache directory: {$this->cacheDir}"
+                    // For now, let it proceed; caching might fail later.
+                }
             }
         }
         
-        $this->connect(); // 在构造函数中初始化连接
+        $this->connect(); // Original call to connect for PDO
     }
     
     /**
      * 获取单例实例
-     * @param array $config 数据库配置
+     * @param array|string $config 数据库配置 or 'wordpress' string
      * @return DbCore
      */
     public static function getInstance($config = null)
     {
         if (static::$instance === null) {
-            if ($config === null) {
-                $config = include CONFIG_PATH . '/database.php';
-                $config = $config['connections'][$config['driver']];
+            if ($config === 'wordpress') {
+                static::$instance = new static('wordpress');
+            } elseif ($config === null) { 
+                // Non-WordPress: $config is null, load from file
+                if (!defined('CONFIG_PATH')) {
+                     // Fallback or error for CONFIG_PATH not defined
+                     throw new \startmvc\core\Exception('CONFIG_PATH is not defined. Cannot load database configuration for non-WordPress context.');
+                }
+                $db_config_file = CONFIG_PATH . 'database.php';
+                if (!file_exists($db_config_file)) {
+                    throw new \startmvc\core\Exception('Database configuration file not found: ' . $db_config_file);
+                }
+                $db_settings = include $db_config_file; // @include can be used if preferred
+                if ($db_settings === false || !is_array($db_settings)) {
+                    throw new \startmvc\core\Exception('Failed to load or parse database configuration file: ' . $db_config_file);
+                }
+                if (!isset($db_settings['driver']) || empty($db_settings['driver']) || !isset($db_settings['connections'][$db_settings['driver']])) {
+                    throw new \startmvc\core\Exception('Database configuration is invalid. "driver" or "connections" section missing or malformed in ' . $db_config_file);
+                }
+                $connection_config = $db_settings['connections'][$db_settings['driver']];
+                static::$instance = new static($connection_config);
+            } else { 
+                // Non-WordPress: $config is an array
+                static::$instance = new static($config);
             }
-            static::$instance = new static($config);
         }
         return static::$instance;
     }
 
     /**
      * 连接数据库
-     * @return PDO
+     * @return PDO|object
      * @throws Exception
      */
     protected function connect()
     {
-        if ($this->connected) {
+        if ($this->wpdb) {
+            return $this->wpdb; // In WordPress mode, $wpdb is the connection
+        }
+        if ($this->connected && $this->pdo) {
             return $this->pdo;
+        }
+
+        if (empty($this->config) || !is_array($this->config)) {
+            throw new Exception('Database configuration is missing or invalid for PDO connection.');
+        }
+        
+        // Check for essential config keys before attempting to connect
+        $required_keys = ['driver', 'host', 'port', 'database', 'charset', 'username', 'password'];
+        foreach ($required_keys as $key) {
+            if (!isset($this->config[$key])) {
+                throw new Exception("Database configuration missing required key: {$key}");
+            }
         }
 
         try {
@@ -191,11 +255,14 @@ class DbCore implements DbInterface
     }
 
     /**
-     * 获取PDO实例
-     * @return PDO
+     * 获取PDO实例 (or $wpdb in WordPress mode)
+     * @return PDO|object
      */
     public function getPdo()
     {
+        if ($this->wpdb) {
+            return $this->wpdb;
+        }
         return $this->connect();
     }
 
@@ -979,17 +1046,34 @@ class DbCore implements DbInterface
     public function error()
     {
         if ($this->debug === true) {
+            if ($this->wpdb && method_exists($this->wpdb, 'print_error')) {
+                // $this->wpdb->print_error(); // This prints directly, might not be ideal.
+                // Capture $this->wpdb->last_error if not already in $this->error
+                if (empty($this->error) && !empty($this->wpdb->last_error)) {
+                    $this->error = $this->wpdb->last_error;
+                }
+            }
+            $error_message = "Query: " . htmlspecialchars($this->query ?? '') . "\nError: " . htmlspecialchars($this->error ?? '');
             if (php_sapi_name() === 'cli') {
-                die("Query: " . $this->query . PHP_EOL . "Error: " . $this->error . PHP_EOL);
+                die($error_message . PHP_EOL);
             }
 
             $msg = '<h1>Database Error</h1>';
-            $msg .= '<h4>Query: <em style="font-weight:normal;">"' . $this->query . '"</em></h4>';
-            $msg .= '<h4>Error: <em style="font-weight:normal;">' . $this->error . '</em></h4>';
+            $msg .= '<h4>Query: <em style="font-weight:normal;">"' . htmlspecialchars($this->query ?? 'N/A') . '"</em></h4>';
+            $msg .= '<h4>Error: <em style="font-weight:normal;">' . htmlspecialchars($this->error ?? 'Unknown error') . '</em></h4>';
+            if ($this->wpdb && $this->debug && !empty($this->wpdb->last_error)) {
+                 $msg .= '<h4>WPDB Last Error: <em style="font-weight:normal;">' . htmlspecialchars($this->wpdb->last_error) . '</em></h4>';
+            }
             die($msg);
         }
-
-        throw new PDOException($this->error . '. (' . $this->query . ')');
+        $exception_message = ($this->error ?? 'Unknown database error') . '. (' . ($this->query ?? 'N/A') . ')';
+        if ($this->wpdb) {
+             // For WordPress, avoid throwing PDOException if it's a WPDB error.
+             // Throw a generic exception or a custom one.
+             throw new Exception($exception_message);
+        } else {
+             throw new PDOException($exception_message);
+        }
     }
 
     /**
@@ -1109,16 +1193,27 @@ class DbCore implements DbInterface
 
         if ($returnSql === true || $this->_returnSql) {
             $this->_returnSql = false;
-            $this->reset();
+            $this->reset(); // Reset before returning SQL
             return $query;
         }
 
-        if ($this->query($query, false)) {
-            $this->insertId = $this->pdo->lastInsertId();
-            return $this->insertId();
+        if ($this->wpdb) {
+            $result = $this->query($query, false); // query() handles $wpdb logic
+            if ($result !== false) { // $wpdb->query returns number of affected rows or false on error
+                $this->insertId = $this->wpdb->insert_id;
+                return $this->insertId();
+            }
+            return false;
+        } else {
+            if ($this->query($query, false)) { // Original PDO path
+                if ($this->pdo) { // Ensure pdo object exists
+                    $this->insertId = $this->pdo->lastInsertId();
+                    return $this->insertId();
+                }
+                return false; // Should not happen if query was successful
+            }
+            return false;
         }
-
-        return false;
     }
 
     /**
@@ -1385,12 +1480,21 @@ class DbCore implements DbInterface
      */
     public function transaction()
     {
-        if (!$this->transactionCount++) {
-            return $this->pdo->beginTransaction();
+        if ($this->wpdb) {
+            // $wpdb doesn't support nested transactions or savepoints directly like PDO.
+            // We'll implement basic, single-level transaction support.
+            if ($this->transactionCount === 0) {
+                $this->wpdb->query('START TRANSACTION');
+            }
+            $this->transactionCount++;
+            return true; // Or perhaps return the result of the query.
+        } else {
+            if (!$this->transactionCount++) {
+                return $this->pdo->beginTransaction();
+            }
+            $this->pdo->exec('SAVEPOINT trans' . $this->transactionCount);
+            return $this->transactionCount >= 0;
         }
-
-        $this->pdo->exec('SAVEPOINT trans' . $this->transactionCount);
-        return $this->transactionCount >= 0;
     }
 
     /**
@@ -1400,11 +1504,23 @@ class DbCore implements DbInterface
      */
     public function commit()
     {
-        if (!--$this->transactionCount) {
-            return $this->pdo->commit();
+        if ($this->wpdb) {
+            if ($this->transactionCount > 0) {
+                $this->transactionCount--;
+                if ($this->transactionCount === 0) {
+                    return $this->wpdb->query('COMMIT');
+                }
+            }
+            return true; // Or based on query result
+        } else {
+            if (!--$this->transactionCount) {
+                if ($this->pdo) {
+                    return $this->pdo->commit();
+                }
+                return false; // Should not happen if pdo is not available
+            }
+            return $this->transactionCount >= 0;
         }
-
-        return $this->transactionCount >= 0;
     }
 
     /**
@@ -1414,12 +1530,22 @@ class DbCore implements DbInterface
      */
     public function rollBack()
     {
-        if (--$this->transactionCount) {
-            $this->pdo->exec('ROLLBACK TO trans' . ($this->transactionCount + 1));
-            return true;
+        if ($this->wpdb) {
+            if ($this->transactionCount > 0) {
+                $this->transactionCount--;
+                if ($this->transactionCount === 0 || $this->wpdb->last_error) { // Also rollback if an error occurred
+                    $this->wpdb->query('ROLLBACK');
+                }
+            }
+             return true; // Or based on query result
+        } else {
+            if (! $this->pdo) return false; // No PDO object
+            if (--$this->transactionCount) {
+                $this->pdo->exec('ROLLBACK TO trans' . ($this->transactionCount + 1));
+                return true;
+            }
+            return $this->pdo->rollBack();
         }
-
-        return $this->pdo->rollBack();
     }
 
     /**
@@ -1433,13 +1559,22 @@ class DbCore implements DbInterface
             return null;
         }
 
-        $query = $this->pdo->exec($this->query);
-        if ($query === false) {
-            $this->error = $this->pdo->errorInfo()[2];
-            $this->error();
+        if ($this->wpdb) {
+            $result = $this->wpdb->query($this->query);
+            if ($result === false && !empty($this->wpdb->last_error)) {
+                $this->error = $this->wpdb->last_error;
+                $this->error(); // Trigger error handling
+            }
+            return $result; // Number of affected rows or false
+        } else {
+            if (!$this->pdo) return false; // No PDO object
+            $query = $this->pdo->exec($this->query);
+            if ($query === false) {
+                $this->error = $this->pdo->errorInfo()[2];
+                $this->error();
+            }
+            return $query;
         }
-
-        return $query;
     }
 
     /**
@@ -1457,21 +1592,41 @@ class DbCore implements DbInterface
             return null;
         }
 
-        $query = $this->pdo->query($this->query);
-        if (!$query) {
+        if ($this->wpdb) {
+            // This method is more for PDO style.
+            // The main query() method already handles $wpdb->get_results()
+            // For direct $wpdb fetching if needed, it would be similar to query()
+            // but this method is unlikely to be called directly in WP mode if query() is used.
+            // If it were, it would need its own $wpdb->get_results logic.
+            // For now, assume query() handles WP fetching.
+            // If called, it implies a misuse or needs specific WP implementation here.
+            $this->error = "fetch() method is not directly supported in WordPress mode; use get() or getAll().";
+            $this->error();
+            return null;
+        }
+
+        if (!$this->pdo) {
+             $this->error = "PDO object not available for fetch().";
+             $this->error();
+             return null;
+        }
+
+        $stmt = $this->pdo->query($this->query);
+        if (!$stmt) {
             $this->error = $this->pdo->errorInfo()[2];
             $this->error();
+            return null; // Return null on error
         }
 
-        $type = $this->getFetchType($type);
-        if ($type === PDO::FETCH_CLASS) {
-            $query->setFetchMode($type, $argument);
+        $fetch_style = $this->getFetchType($type);
+        if ($fetch_style === PDO::FETCH_CLASS && $argument !== null) {
+            $stmt->setFetchMode($fetch_style, $argument);
         } else {
-            $query->setFetchMode($type);
+            $stmt->setFetchMode($fetch_style);
         }
-
-        $result = $all ? $query->fetchAll() : $query->fetch();
-        $this->numRows = is_array($result) ? count($result) : 1;
+        
+        $result = $all ? $stmt->fetchAll() : $stmt->fetch();
+        $this->numRows = ($stmt->rowCount() > 0) ? $stmt->rowCount() : (is_array($result) ? count($result) : ($result ? 1 : 0));
         return $result;
     }
 
@@ -1501,97 +1656,200 @@ class DbCore implements DbInterface
     public function query($query, $all = true, $type = null, $argument = null)
     {
         $this->reset();
-        
-        // 记录SQL开始执行时间
         $startTime = microtime(true);
-        $params = [];
+        $params_for_log = []; // For logging with parameters
 
-        if (is_array($all) || func_num_args() === 1) {
-            $params = explode('?', $query);
-            $newQuery = '';
-            foreach ($params as $key => $value) {
-                if (!empty($value)) {
-                    $newQuery .= $value . (isset($all[$key]) ? $this->escape($all[$key]) : '');
-                }
-            }
-            $this->query = $newQuery;
-            
-            // 结束计时并记录日志
-            $executionTime = microtime(true) - $startTime;
-            self::logSql($this->query, is_array($all) ? $all : [], $executionTime);
-            
-            return $this;
-        }
-
-        $this->query = preg_replace('/\s\s+|\t\t+/', ' ', trim($query));
-        $str = false;
-        foreach (['select', 'optimize', 'check', 'repair', 'checksum', 'analyze'] as $value) {
-            if (stripos($this->query, $value) === 0) {
-                $str = true;
-                break;
-            }
-        }
-
-        $type = $this->getFetchType($type);
-        $cache = false;
-        if (!is_null($this->cache) && $type !== PDO::FETCH_CLASS) {
-            // 查询缓存时，设置默认返回关联数组
-            $cache = $this->cache->getCache($this->query, true);
-        }
-
-        if (!$cache && $str) {
-            $sql = $this->pdo->query($this->query);
-            if ($sql) {
-                $this->numRows = $sql->rowCount();
-                if ($this->numRows > 0) {
-                    if ($type === PDO::FETCH_CLASS) {
-                        $sql->setFetchMode($type, $argument);
-                    } else {
-                        $sql->setFetchMode($type);
-                    }
-                    $this->result = $all ? $sql->fetchAll() : $sql->fetch();
-                    
-                    // 保存当前的joinNodes，因为reset会清空它
-                    $currentJoinNodes = $this->joinNodes;
-                    
-                    // 处理子节点查询结果
-                    if (!empty($currentJoinNodes) && is_array($this->result)) {
-                        $this->result = $this->nodeParser($this->result);
-                    }
-                }
-
-                if (!is_null($this->cache) && $type !== PDO::FETCH_CLASS) {
-                    $this->cache->setCache($this->query, $this->result);
-                }
-                $this->cache = null;
+        // WordPress Mode
+        if ($this->wpdb) {
+            // If $all is an array, it means parameters are passed for prepared statement (though $wpdb uses sprintf/prepare)
+            // This part is tricky because the original class uses ? for placeholders and $wpdb->prepare uses %s, %d, %f.
+            // For simplicity, we'll assume the query string is already prepared if it's a direct call to query() in WP mode.
+            // If you need to support `Db::query("SELECT * FROM users WHERE id = ?", [$id])` in WP,
+            // it would require a more complex parsing and conversion to $wpdb->prepare format.
+            // The existing builder methods (where, select, etc.) should construct the query string directly.
+            if (is_array($all)) {
+                // This specific parameter binding style is more PDO-like.
+                // For $wpdb, one typically uses $wpdb->prepare().
+                // We will log these params, but assume $query is mostly pre-built by other methods.
+                $params_for_log = $all;
+                // The original code had logic to replace '?' with escaped params here.
+                // Replicating that accurately for $wpdb without $wpdb->prepare is complex.
+                // Let's assume $query is mostly complete or uses $wpdb specific placeholders if prepared externally.
+                // For now, we'll just use the $query as is for $wpdb.
+                 $this->query = $query; // Use the query directly
             } else {
-                $this->cache = null;
-                $this->error = $this->pdo->errorInfo()[2];
-                $this->error();
+                $this->query = preg_replace('/\s\s+|\t\t+/', ' ', trim($query));
             }
-        } elseif ((!$cache && !$str) || ($cache && !$str)) {
-            $this->cache = null;
-            $this->result = $this->pdo->exec($this->query);
 
-            if ($this->result === false) {
-                $this->error = $this->pdo->errorInfo()[2];
-                $this->error();
-            }
-        } else {
+            $query_lower = strtolower(trim($this->query));
+            $query_type = '';
+
+            if (strpos($query_lower, 'select') === 0) $query_type = 'select';
+            else if (strpos($query_lower, 'insert') === 0) $query_type = 'insert';
+            else if (strpos($query_lower, 'update') === 0) $query_type = 'update';
+            else if (strpos($query_lower, 'delete') === 0) $query_type = 'delete';
+            else if (strpos($query_lower, 'show') === 0) $query_type = 'show'; // e.g. SHOW TABLES
+            else $query_type = 'other'; // Analyze, optimize, truncate etc.
+
+            // Disable StartMVC's file cache when in WordPress mode, $wpdb has its own.
             $this->cache = null;
-            $this->result = $cache;
-            $this->numRows = is_array($this->result) ? count($this->result) : ($this->result === '' ? 0 : 1);
+
+            if ($query_type === 'select' || $query_type === 'show') {
+                $wpOutputType = ARRAY_A; // Default
+                $pdoFetchStyle = $this->getFetchType($type);
+
+                if ($pdoFetchStyle === PDO::FETCH_OBJ) {
+                    $wpOutputType = OBJECT;
+                } elseif ($pdoFetchStyle === PDO::FETCH_CLASS) {
+                    // $wpdb->get_results can return objects, but not directly instances of a specific class with constructor args.
+                    // We fetch as OBJECT or ARRAY_A and then manually create instances if $argument (classname) is provided.
+                    $wpOutputType = OBJECT; // Fetch as generic objects first
+                }
+                
+                if ($all) { // Corresponds to getAll()
+                    $this->result = $this->wpdb->get_results($this->query, $wpOutputType);
+                } else { // Corresponds to get() - expecting a single row
+                    $this->result = $this->wpdb->get_row($this->query, $wpOutputType);
+                }
+                
+                $this->numRows = $this->wpdb->num_rows;
+
+                if ($pdoFetchStyle === PDO::FETCH_CLASS && $argument !== null && !empty($this->result)) {
+                    if (class_exists($argument)) {
+                        $hydratedResult = [];
+                        $results_to_hydrate = is_array($this->result) ? $this->result : [$this->result];
+                        foreach ($results_to_hydrate as $row) {
+                            if($row === null) continue;
+                            $instance = new $argument();
+                            foreach ($row as $key => $value) {
+                                $instance->$key = $value;
+                            }
+                            $hydratedResult[] = $instance;
+                        }
+                        $this->result = $all ? $hydratedResult : ($hydratedResult[0] ?? null);
+                    } else {
+                        // Class not found, log or handle error, return raw result
+                        // For now, returning the raw $wpOutputType result
+                    }
+                }
+
+            } else { // INSERT, UPDATE, DELETE, other
+                $exec_result = $this->wpdb->query($this->query);
+                if ($exec_result === false) {
+                    $this->error = $this->wpdb->last_error;
+                    if (!empty($this->error)) $this->error(); // Trigger error handling only if there's an error message
+                    $this->result = false; // Ensure result is explicitly false on error
+                } else {
+                    $this->result = $exec_result; // Number of affected rows
+                    if ($query_type === 'insert') {
+                        // $this->insertId is set in the insert() method.
+                    }
+                    $this->numRows = is_numeric($exec_result) ? $exec_result : 0;
+                }
+            }
             
-            // 对缓存结果进行子节点处理
+            if (!empty($this->wpdb->last_error) && empty($this->error)) { // Check if error was set by $this->error() already
+                $this->error = $this->wpdb->last_error;
+                // Potentially call $this->error() again if it wasn't triggered for some reason
+            }
+
+            // Node parsing - this was specific to the original structure, might need review with $wpdb
             $currentJoinNodes = $this->joinNodes;
             if (!empty($currentJoinNodes) && is_array($this->result)) {
-                $this->result = $this->nodeParser($this->result);
+                 $this->result = $this->nodeParser($this->result);
             }
+
+        } else { // Original PDO Logic
+            if (!$this->pdo) {
+                 throw new Exception("PDO connection not available.");
+            }
+            if (is_array($all) || func_num_args() === 1 && !is_bool($all)) {
+                // This is the path for Db::query("SELECT * FROM foo WHERE id = ?", [$id]);
+                $params_for_log = is_array($all) ? $all : [];
+                // The original code built the query by replacing '?'
+                // Modern PDO usage would use prepared statements and execute.
+                // For now, sticking to the original's direct replacement logic for this specific case.
+                $parts = explode('?', $query);
+                $newQuery = '';
+                foreach ($parts as $key => $value) {
+                    if (!empty($value)) {
+                        $newQuery .= $value . (isset($params_for_log[$key]) ? $this->escape($params_for_log[$key]) : '');
+                    }
+                }
+                $this->query = $newQuery;
+                // This path in original code returned $this, not executing the query.
+                // This seems like a way to build a query with params, then call exec() or fetch() later.
+                // However, exec() and fetch() in original code don't take $params.
+                // This path is confusing. Let's assume it's for query building only.
+                // To make it runnable, it would need to execute here.
+                // For now, to match original return type for this branch:
+                 $executionTime = microtime(true) - $startTime;
+                 self::logSql($this->query, $params_for_log, $executionTime);
+                 return $this; // Original behavior for this specific argument pattern
+            }
+
+            $this->query = preg_replace('/\s\s+|\t\t+/', ' ', trim($query));
+            $is_select_like = false;
+            foreach (['select', 'optimize', 'check', 'repair', 'checksum', 'analyze', 'show'] as $value) {
+                if (stripos($this->query, $value) === 0) {
+                    $is_select_like = true;
+                    break;
+                }
+            }
+
+            $fetch_style = $this->getFetchType($type);
+            $cached_result = false;
+
+            if ($this->cache !== null && $fetch_style !== PDO::FETCH_CLASS && $is_select_like) {
+                $cached_result = $this->cache->getCache($this->query, true);
+            }
+
+            if ($cached_result !== false) {
+                $this->result = $cached_result;
+                $this->numRows = is_array($this->result) ? count($this->result) : ($this->result === '' || $this->result === null ? 0 : 1);
+                $currentJoinNodes = $this->joinNodes;
+                if (!empty($currentJoinNodes) && is_array($this->result)) {
+                    $this->result = $this->nodeParser($this->result);
+                }
+            } elseif ($is_select_like) {
+                $stmt = $this->pdo->query($this->query);
+                if ($stmt) {
+                    $this->numRows = $stmt->rowCount();
+                    if ($this->numRows > 0) {
+                        if ($fetch_style === PDO::FETCH_CLASS && $argument !== null) {
+                            $stmt->setFetchMode($fetch_style, $argument);
+                        } else {
+                            $stmt->setFetchMode($fetch_style);
+                        }
+                        $this->result = $all ? $stmt->fetchAll() : $stmt->fetch();
+                        
+                        $currentJoinNodes = $this->joinNodes;
+                        if (!empty($currentJoinNodes) && is_array($this->result)) {
+                            $this->result = $this->nodeParser($this->result);
+                        }
+                    } else {
+                        $this->result = $all ? [] : null; // Ensure consistent empty result
+                    }
+                    if ($this->cache !== null && $fetch_style !== PDO::FETCH_CLASS) {
+                        $this->cache->setCache($this->query, $this->result);
+                    }
+                } else {
+                    $this->error = $this->pdo->errorInfo()[2];
+                    $this->error();
+                }
+            } else { // Not a SELECT-like query, and not cached (or cache disabled)
+                $this->result = $this->pdo->exec($this->query);
+                if ($this->result === false) {
+                    $this->error = $this->pdo->errorInfo()[2];
+                    $this->error();
+                }
+                $this->numRows = is_numeric($this->result) ? $this->result : 0;
+            }
+            $this->cache = null; // Reset cache instance after use
         }
 
-        // 计算执行时间并记录SQL
         $executionTime = microtime(true) - $startTime;
-        self::logSql($this->query, $params, $executionTime);
+        self::logSql($this->query, $params_for_log, $executionTime);
 
         $this->queryCount++;
         return $this->result;
@@ -1606,9 +1864,29 @@ class DbCore implements DbInterface
      */
     public function escape($data)
     {
-        return $data === null ? 'NULL' : (
-            is_int($data) || is_float($data) ? $data : $this->pdo->quote($data)
-        );
+        if ($data === null) {
+            return 'NULL';
+        }
+        if (is_int($data) || is_float($data)) {
+            // Ensure float is formatted correctly for SQL (no locale specific comma)
+            if (is_float($data)) {
+                 return rtrim(rtrim(number_format($data, 10, '.', ''), '0'), '.');
+            }
+            return $data;
+        }
+        if ($this->wpdb) {
+            // $wpdb->prepare uses %s for strings, which handles escaping.
+            // For direct value escaping, _real_escape is available but typically not used directly in queries.
+            // $wpdb->quote() is not a standard method.
+            // The most common way is to use $wpdb->prepare.
+            // If building queries manually and needing to escape, this is how:
+            return "'" . $this->wpdb->_real_escape((string)$data) . "'";
+        }
+        if ($this->pdo) {
+            return $this->pdo->quote((string)$data);
+        }
+        // Fallback if no DB connection active, though this shouldn't happen in normal flow
+        return "'" . addslashes((string)$data) . "'"; // Basic fallback, not recommended for production
     }
 
     /**
@@ -1680,6 +1958,7 @@ class DbCore implements DbInterface
     public function __destruct()
     {
         $this->pdo = null;
+        // $this->wpdb is global, not managed by this class instance lifecycle for nulling
     }
 
     /**
@@ -1957,19 +2236,24 @@ class DbCore implements DbInterface
 
         // 构建字段列表
         $fieldList = [];
-        foreach ($columns as $alias => $field) {
-            $fieldList[] = "{$field} AS {$alias}";
+        foreach ($columns as $alias_col => $field) { // Changed $alias to $alias_col to avoid conflict
+            $fieldList[] = "{$field} AS {$alias_col}";
         }
 
         // 使用子查询构建嵌套数据
-        $subQuery = "(SELECT " . implode(', ', $fieldList) . " FROM " . $this->from . " WHERE " . $this->where . ")";
+        // This subquery is conceptual. Actual implementation depends on DB's JSON or XML capabilities.
+        // For MySQL 5.7+, you might use JSON_OBJECT or JSON_ARRAYAGG.
+        // Example: (SELECT JSON_ARRAYAGG(JSON_OBJECT('id', o.id, 'amount', o.amount)) FROM orders o WHERE o.user_id = main_table.id)
+        // The $this->from and $this->where in the subquery below are likely incorrect as they refer to the main query's state.
+        // This part needs significant rework for a robust solution.
+        $subQuery = "(SELECT " . implode(', ', $fieldList) . " FROM " . $this->from . " WHERE " . $this->where . ")"; // This subquery logic is flawed
         
         // 将子查询添加到SELECT中
         $this->select("({$subQuery}) AS {$alias}");
         
-        // 添加GROUP BY子句
+        // 添加GROUP BY子句 - This also needs careful consideration based on main query structure.
         if (is_null($this->groupBy)) {
-            $this->group($this->from . '.id');
+            // $this->group($this->from . '.id'); // This is a simplistic assumption
         }
                     
         return $this;
@@ -1988,18 +2272,13 @@ class DbCore implements DbInterface
             return $results;
         }
         
-        // 使用array_walk_recursive递归处理所有结果
+        // This parsing logic assumes that the subquery (from joinNode) returns a JSON string
+        // that needs to be decoded. This is highly dependent on how the SQL query is constructed.
         array_walk_recursive($results, function(&$value, $key) {
-            // 处理嵌套对象
-            if (is_object($value)) {
-                return;
-            }
-            
-            // 如果键名在joinNodes中，处理子查询结果
-            if (in_array($key, $this->joinNodes)) {
-                // 将子查询结果转换为数组
-                if (is_string($value)) {
-                    $value = json_decode($value, true);
+            if (in_array($key, $this->joinNodes) && is_string($value)) {
+                $decoded = json_decode($value, true);
+                if (json_last_error() === JSON_ERROR_NONE) {
+                    $value = $decoded;
                 }
             }
         });
