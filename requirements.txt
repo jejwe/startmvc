@@ -1,0 +1,15 @@
+cherrypy>=18.8.0
+jinja2>=3.1.2
+pymysql>=1.1.0
+psycopg2-binary>=2.9.6
+sqlalchemy>=2.0.20
+bcrypt>=4.0.1
+pyjwt>=2.8.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+pillow>=10.1.0
+markdown>=3.5.1
+bleach>=6.1.0
+pyyaml>=6.0.1
+redis>=5.0.1
+python-memcached>=1.59

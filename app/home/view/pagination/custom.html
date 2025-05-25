@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        .custom-pagination {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        
+        .custom-pagination .page-link {
+            margin: 0 5px;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #007bff;
+            background-color: #fff;
+            border: 1px solid #dee2e6;
+        }
+        
+        .custom-pagination .page-link:hover {
+            background-color: #e9ecef;
+            border-color: #dee2e6;
+            color: #0056b3;
+        }
+        
+        .custom-pagination .page-item.active .page-link {
+            background-color: #007bff;
+            border-color: #007bff;
+            color: #fff;
+        }
+        
+        .custom-pagination .page-item.disabled .page-link {
+            color: #6c757d;
+            pointer-events: none;
+            background-color: #fff;
+            border-color: #dee2e6;
+        }
+        
+        .custom-pagination .page-nav {
+            margin: 0 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1>{{ title }}</h1>
+        
+        <div class="mb-4">
+            <a href="/home/pagination/index" class="btn btn-secondary me-2">返回</a>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                分页信息
+            </div>
+            <div class="card-body">
+                <p>总记录数: {{ total }}</p>
+                <p>每页记录数: {{ per_page }}</p>
+                <p>当前页码: {{ current_page }}</p>
+                <p>总页数: {{ pagination.last_page }}</p>
+            </div>
+        </div>
+        
+        <h2>数据列表</h2>
+        
+        <div class="row">
+            {% for item in items %}
+            <div class="col-md-4 mb-4">
+                <div class="card">
+                    <div class="card-header">
+                        {{ item.title }}
+                    </div>
+                    <div class="card-body">
+                        <p>{{ item.content }}</p>
+                        <p class="text-muted">{{ item.created_at }}</p>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <div class="custom-pagination">
+            {% if pagination.has_previous %}
+            <a href="?page={{ pagination.previous_page }}" class="btn btn-outline-primary page-nav">
+                <i class="bi bi-chevron-left"></i> 上一页
+            </a>
+            {% else %}
+            <button class="btn btn-outline-secondary page-nav" disabled>
+                <i class="bi bi-chevron-left"></i> 上一页
+            </button>
+            {% endif %}
+            
+            <ul class="pagination">
+                {% if pagination.current_page > 3 %}
+                <li class="page-item">
+                    <a class="page-link" href="?page=1">1</a>
+                </li>
+                {% if pagination.current_page > 4 %}
+                <li class="page-item disabled">
+                    <span class="page-link">...</span>
+                </li>
+                {% endif %}
+                {% endif %}
+                
+                {% for page in range(max(1, pagination.current_page - 2), min(pagination.last_page + 1, pagination.current_page + 3)) %}
+                <li class="page-item {% if page == current_page %}active{% endif %}">
+                    <a class="page-link" href="?page={{ page }}">{{ page }}</a>
+                </li>
+                {% endfor %}
+                
+                {% if pagination.current_page < pagination.last_page - 2 %}
+                {% if pagination.current_page < pagination.last_page - 3 %}
+                <li class="page-item disabled">
+                    <span class="page-link">...</span>
+                </li>
+                {% endif %}
+                <li class="page-item">
+                    <a class="page-link" href="?page={{ pagination.last_page }}">{{ pagination.last_page }}</a>
+                </li>
+                {% endif %}
+            </ul>
+            
+            {% if pagination.has_next %}
+            <a href="?page={{ pagination.next_page }}" class="btn btn-outline-primary page-nav">
+                下一页 <i class="bi bi-chevron-right"></i>
+            </a>
+            {% else %}
+            <button class="btn btn-outline-secondary page-nav" disabled>
+                下一页 <i class="bi bi-chevron-right"></i>
+            </button>
+            {% endif %}
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

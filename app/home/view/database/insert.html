@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-5">
+        <h1>{{ title }}</h1>
+        
+        <div class="mb-4">
+            <a href="/home/database/index" class="btn btn-secondary">返回</a>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                SQL语句
+            </div>
+            <div class="card-body">
+                <pre>{{ sql }}</pre>
+            </div>
+        </div>
+        
+        <h2>插入结果</h2>
+        
+        <div class="alert alert-success">
+            <p>影响行数: {{ result }}</p>
+            <p>最后插入ID: {{ last_insert_id }}</p>
+        </div>
+        
+        <div class="mt-4">
+            <a href="/home/database/index" class="btn btn-primary">查看数据列表</a>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
